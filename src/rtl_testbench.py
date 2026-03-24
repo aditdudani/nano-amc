@@ -1,57 +1,385 @@
-"""Helpers that prepare test vectors and wrapper files for the RTL accelerator."""
+"""Generate test vectors and Verilog testbench for RTL simulation."""
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Union
+from typing import Tuple
 
 import numpy as np
+import tensorflow as tf
 
-from data_loader_1d import load_iq_dataset, filter_samples, build_tf_datasets
+from config import (
+    DATASET_PATH,
+    TARGET_MODS,
+    TARGET_SNRS,
+    MODEL_PATH,
+    RTL_EXPORT_DIR,
+    TEST_VECTORS_DIR,
+    BATCH_SIZE,
+    FIXED_POINT_TOTAL_BITS,
+    FIXED_POINT_FRAC_BITS,
+)
+from data_loader_1d import load_and_prepare_data
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("rtl_testbench")
 
 
-def quantize_to_fixed(samples: np.ndarray, bits: int = 16) -> np.ndarray:
-    scale = 2 ** (bits - 1) - 1
-    quantized = np.round(np.clip(samples, -1.0, 1.0) * scale).astype(np.int16)
-    return quantized
+def quantize_to_fixed(
+    samples: np.ndarray,
+    frac_bits: int = FIXED_POINT_FRAC_BITS,
+    total_bits: int = FIXED_POINT_TOTAL_BITS,
+) -> np.ndarray:
+    """Quantize float samples to ap_fixed<total_bits, total_bits-frac_bits> format.
+
+    For ap_fixed<16,6>: 16 bits total, 6 integer bits (incl. sign), 10 fractional bits.
+    - Range: [-32, +32) with resolution 2^-10 ≈ 0.001
+    - Input range [-1, 1] maps to [-1024, +1024] in fixed-point
+
+    Args:
+        samples: Float samples in range [-1, 1]
+        frac_bits: Number of fractional bits (10 for ap_fixed<16,6>)
+        total_bits: Total number of bits (16 for ap_fixed<16,6>)
+
+    Returns:
+        Quantized samples as int16 (two's complement)
+    """
+    scale = 2 ** frac_bits  # = 1024 for 10 fractional bits
+
+    # Scale and round
+    scaled = np.round(samples * scale)
+
+    # Clip to representable range for signed integer
+    max_val = 2 ** (total_bits - 1) - 1  # 32767
+    min_val = -(2 ** (total_bits - 1))   # -32768
+    clipped = np.clip(scaled, min_val, max_val)
+
+    return clipped.astype(np.int16)
 
 
-def write_hex_vectors(samples: np.ndarray, output_path: Path) -> None:
-    flattened = samples.reshape(-1, 2)
-    with open(output_path, "w") as outf:
-        for i, (i_sample, q_sample) in enumerate(flattened):
-            outf.write(f"{i_sample:04x}{q_sample:04x}\n")
+def int16_to_hex(value: np.int16) -> str:
+    """Convert signed int16 to 4-digit hex string (two's complement)."""
+    # Convert to unsigned for hex representation
+    if value < 0:
+        value = value + 65536  # 2^16
+    return f"{value:04X}"
+
+
+def write_hex_vectors(
+    samples: np.ndarray,
+    labels: np.ndarray,
+    output_dir: Path,
+    num_vectors: int = 16,
+) -> Tuple[Path, Path]:
+    """Write test vectors and expected labels as hex files.
+
+    Args:
+        samples: Quantized I/Q samples [N, 1024, 2] as int16
+        labels: Ground truth labels [N]
+        output_dir: Output directory
+        num_vectors: Number of test vectors to write
+
+    Returns:
+        Tuple of (input_path, labels_path)
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    num_vectors = min(num_vectors, len(samples))
+    input_path = output_dir / "test_inputs.hex"
+    labels_path = output_dir / "expected_labels.hex"
+
+    # Write input vectors
+    # Format: One line per I/Q sample pair, 1024 lines per test vector
+    # Each line: IIIIQQQQ (I and Q as 4-digit hex, concatenated for 32-bit $readmemh)
+    with open(input_path, "w") as f:
+        f.write(f"// {num_vectors} test vectors, 1024 I/Q pairs each\n")
+        f.write(f"// Format: IIIIQQQQ (32-bit: I[31:16], Q[15:0], ap_fixed<16,6>)\n")
+        for vec_idx in range(num_vectors):
+            f.write(f"// --- Vector {vec_idx} (label={labels[vec_idx]}) ---\n")
+            for sample_idx in range(samples.shape[1]):  # 1024 samples
+                i_val = samples[vec_idx, sample_idx, 0]
+                q_val = samples[vec_idx, sample_idx, 1]
+                # Concatenate I and Q into single 32-bit hex value for $readmemh
+                f.write(f"{int16_to_hex(i_val)}{int16_to_hex(q_val)}\n")
+
+    logger.info("Wrote %d test vectors (%d I/Q pairs each) to %s",
+                num_vectors, samples.shape[1], input_path)
+
+    # Write expected labels
+    with open(labels_path, "w") as f:
+        f.write(f"// Expected output labels for {num_vectors} test vectors\n")
+        for vec_idx in range(num_vectors):
+            f.write(f"{labels[vec_idx]:02X}\n")
+
+    logger.info("Wrote %d expected labels to %s", num_vectors, labels_path)
+
+    return input_path, labels_path
+
+
+def generate_verilog_testbench(
+    output_dir: Path,
+    num_vectors: int = 16,
+    num_samples: int = 1024,
+    num_classes: int = 8,
+) -> Path:
+    """Generate a Verilog testbench for the AMC accelerator.
+
+    Args:
+        output_dir: Output directory
+        num_vectors: Number of test vectors
+        num_samples: Number of I/Q samples per vector (1024)
+        num_classes: Number of output classes (8)
+
+    Returns:
+        Path to generated testbench file
+    """
+    tb_path = output_dir / "tb_amc_accelerator.v"
+
+    testbench_code = f'''`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////
+// Testbench for nano-amc FPGA accelerator
+// Auto-generated by rtl_testbench.py
+//
+// Test configuration:
+//   - {num_vectors} test vectors
+//   - {num_samples} I/Q samples per vector
+//   - {num_classes} output classes
+//   - Fixed-point: ap_fixed<16,6> (16-bit, 6 integer bits)
+//////////////////////////////////////////////////////////////////////////////
+
+module tb_amc_accelerator;
+
+    // Parameters
+    localparam NUM_VECTORS = {num_vectors};
+    localparam NUM_SAMPLES = {num_samples};
+    localparam NUM_CLASSES = {num_classes};
+    localparam DATA_WIDTH = 16;
+    localparam CLK_PERIOD = 10;  // 100 MHz
+
+    // DUT signals
+    reg clk;
+    reg rst_n;
+    reg start;
+    reg [DATA_WIDTH-1:0] i_data;
+    reg [DATA_WIDTH-1:0] q_data;
+    reg data_valid;
+    wire done;
+    wire [$clog2(NUM_CLASSES)-1:0] prediction;
+    wire prediction_valid;
+
+    // Test data storage
+    reg [31:0] test_inputs [0:NUM_VECTORS*NUM_SAMPLES-1];  // {I[15:0], Q[15:0]}
+    reg [7:0]  expected_labels [0:NUM_VECTORS-1];
+
+    // Test counters
+    integer vector_idx;
+    integer sample_idx;
+    integer pass_count;
+    integer fail_count;
+
+    // Clock generation
+    initial begin
+        clk = 0;
+        forever #(CLK_PERIOD/2) clk = ~clk;
+    end
+
+    // DUT instantiation (adjust module name and ports as needed)
+    // myproject is the default hls4ml top-level module name
+    /*
+    myproject dut (
+        .ap_clk(clk),
+        .ap_rst_n(rst_n),
+        .ap_start(start),
+        .ap_done(done),
+        .ap_idle(),
+        .ap_ready(),
+        .input_1_V({{i_data, q_data}}),  // Concatenated I/Q input
+        .layer_out_0_V(prediction),
+        .layer_out_0_V_ap_vld(prediction_valid)
+    );
+    */
+
+    // Load test data and run simulation
+    initial begin
+        // Initialize
+        rst_n = 0;
+        start = 0;
+        i_data = 0;
+        q_data = 0;
+        data_valid = 0;
+        pass_count = 0;
+        fail_count = 0;
+
+        // Load test vectors
+        $readmemh("test_vectors/test_inputs.hex", test_inputs);
+        $readmemh("test_vectors/expected_labels.hex", expected_labels);
+
+        // Reset sequence
+        #(CLK_PERIOD*10);
+        rst_n = 1;
+        #(CLK_PERIOD*5);
+
+        $display("==============================================");
+        $display("nano-amc Accelerator Testbench");
+        $display("Testing %0d vectors with %0d samples each", NUM_VECTORS, NUM_SAMPLES);
+        $display("==============================================");
+
+        // Process each test vector
+        for (vector_idx = 0; vector_idx < NUM_VECTORS; vector_idx = vector_idx + 1) begin
+            $display("\\nVector %0d: Expected label = %0d", vector_idx, expected_labels[vector_idx]);
+
+            // Start inference
+            start = 1;
+            @(posedge clk);
+            start = 0;
+
+            // Feed I/Q samples
+            for (sample_idx = 0; sample_idx < NUM_SAMPLES; sample_idx = sample_idx + 1) begin
+                i_data = test_inputs[vector_idx * NUM_SAMPLES + sample_idx][31:16];
+                q_data = test_inputs[vector_idx * NUM_SAMPLES + sample_idx][15:0];
+                data_valid = 1;
+                @(posedge clk);
+            end
+            data_valid = 0;
+
+            // Wait for result (with timeout)
+            fork
+                begin
+                    wait(prediction_valid);
+                end
+                begin
+                    #(CLK_PERIOD * 10000);  // Timeout after 10k cycles
+                    $display("ERROR: Timeout waiting for prediction");
+                end
+            join_any
+            disable fork;
+
+            // Check result
+            if (prediction_valid) begin
+                if (prediction == expected_labels[vector_idx]) begin
+                    $display("  PASS: Got %0d, expected %0d", prediction, expected_labels[vector_idx]);
+                    pass_count = pass_count + 1;
+                end else begin
+                    $display("  FAIL: Got %0d, expected %0d", prediction, expected_labels[vector_idx]);
+                    fail_count = fail_count + 1;
+                end
+            end
+
+            #(CLK_PERIOD * 10);
+        end
+
+        // Summary
+        $display("\\n==============================================");
+        $display("Test Summary: %0d PASS, %0d FAIL out of %0d", pass_count, fail_count, NUM_VECTORS);
+        $display("Accuracy: %.1f%%", 100.0 * pass_count / NUM_VECTORS);
+        $display("==============================================");
+
+        $finish;
+    end
+
+endmodule
+'''
+
+    with open(tb_path, "w") as f:
+        f.write(testbench_code)
+
+    logger.info("Generated Verilog testbench at %s", tb_path)
+    return tb_path
+
+
+def get_model_predictions(
+    model_path: Path,
+    samples: np.ndarray,
+    num_vectors: int = 16,
+) -> np.ndarray:
+    """Get model predictions for test samples.
+
+    Args:
+        model_path: Path to trained Keras model
+        samples: Float I/Q samples [N, 1024, 2]
+        num_vectors: Number of vectors to predict
+
+    Returns:
+        Predicted class indices [num_vectors]
+    """
+    if not model_path.exists():
+        logger.warning("Model not found at %s, using ground truth labels instead", model_path)
+        return None
+
+    model = tf.keras.models.load_model(model_path)
+    predictions = model.predict(samples[:num_vectors], verbose=0)
+    return np.argmax(predictions, axis=1)
 
 
 def main() -> None:
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger("rtl_testbench")
-    
+    """Generate test vectors and Verilog testbench."""
+    num_vectors = 16
+
     try:
-        data = load_iq_dataset(Path("data/radio_ml_2018_01A.h5"))
-        samples, labels = filter_samples(data, mods=["QPSK"], snrs=[8, 10])
-        _, val_ds, _ = build_tf_datasets(samples, labels)
+        logger.info("Loading validation data...")
+        train_ds, val_ds, test_ds, class_names = load_and_prepare_data(
+            file_path=DATASET_PATH,
+            target_mods=TARGET_MODS,
+            target_snrs=TARGET_SNRS,
+            batch_size=BATCH_SIZE,
+        )
 
-        collected = []
-        for batch in val_ds.take(3):
-            features, _ = batch
-            collected.append(features.numpy())
+        # Collect samples from validation set
+        samples_list = []
+        labels_list = []
+        for batch_x, batch_y in val_ds:
+            samples_list.append(batch_x.numpy())
+            labels_list.append(batch_y.numpy())
+            if sum(len(s) for s in samples_list) >= num_vectors:
+                break
 
-        if not collected:
-            raise ValueError("No validation samples found; testbench requires at least 1 sample")
-        
-        val_samples = np.concatenate(collected, axis=0)
-        logger.info("Collected %d validation samples", val_samples.shape[0])
-        
-        num_vectors = min(16, val_samples.shape[0])
-        quantized = quantize_to_fixed(val_samples[:num_vectors])
-        
-        output_path = Path("fpga_rtl_export/test_vectors/validation.hex")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        write_hex_vectors(quantized, output_path)
-        logger.info("Wrote %d test vectors to %s", num_vectors, output_path)
+        if not samples_list:
+            raise ValueError("No validation samples found")
+
+        samples = np.concatenate(samples_list, axis=0)[:num_vectors]
+        labels = np.concatenate(labels_list, axis=0)[:num_vectors]
+
+        logger.info("Collected %d validation samples", len(samples))
+        logger.info("Sample shape: %s, dtype: %s", samples.shape, samples.dtype)
+        logger.info("Labels: %s", labels)
+        logger.info("Class mapping: %s", {i: name for i, name in enumerate(class_names)})
+
+        # Get model predictions if available
+        model_predictions = get_model_predictions(MODEL_PATH, samples, num_vectors)
+        if model_predictions is not None:
+            logger.info("Model predictions: %s", model_predictions)
+            match_count = np.sum(model_predictions == labels)
+            logger.info("Model accuracy on test vectors: %d/%d (%.1f%%)",
+                        match_count, len(labels), 100.0 * match_count / len(labels))
+
+        # Quantize samples
+        logger.info("Quantizing to ap_fixed<16,6> (10 fractional bits)...")
+        quantized = quantize_to_fixed(samples)
+        logger.info("Quantized range: [%d, %d]", quantized.min(), quantized.max())
+
+        # Write hex vectors
+        TEST_VECTORS_DIR.mkdir(parents=True, exist_ok=True)
+        write_hex_vectors(quantized, labels, TEST_VECTORS_DIR, num_vectors)
+
+        # Generate Verilog testbench
+        generate_verilog_testbench(
+            RTL_EXPORT_DIR,
+            num_vectors=num_vectors,
+            num_samples=samples.shape[1],
+            num_classes=len(class_names),
+        )
+
+        logger.info("Testbench generation complete!")
+        logger.info("Output files:")
+        logger.info("  - %s", TEST_VECTORS_DIR / "test_inputs.hex")
+        logger.info("  - %s", TEST_VECTORS_DIR / "expected_labels.hex")
+        logger.info("  - %s", RTL_EXPORT_DIR / "tb_amc_accelerator.v")
+
+    except FileNotFoundError as e:
+        logger.error("Dataset not found: %s", e)
+        logger.info("Download RadioML 2018.01A from https://www.deepsig.ai/datasets")
+        raise
     except Exception as e:
         logger.error("Testbench generation failed: %s", e, exc_info=True)
         raise

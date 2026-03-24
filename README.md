@@ -8,10 +8,24 @@ Lightweight 1D CNN for real-time spectrum monitoring and signal classification, 
 
 **Application Domain:** Defense - Automatic Modulation Classification for spectrum monitoring/threat detection.
 
-**Dataset:** RadioML 2018.01A (public)
+**Dataset:** RadioML 2018.01A (public, download from https://www.deepsig.ai/datasets)
 - Shape: `[N, 1024, 2]` (1024 I/Q samples, 2 channels)
 - 8 modulation classes: BPSK, 4ASK, QPSK, OQPSK, 8PSK, 16QAM, 32QAM, 64QAM
 - SNR filter: 0, 2, 4, 6, 8, 10 dB
+
+**Target Hardware:** PYNQ-Z1/Z2 (Zynq xc7z020clg400-1)
+
+---
+
+## Current Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Data Pipeline | **Ready** | Loads RadioML 2018.01A, filters, normalizes |
+| 1D CNN Model | **Ready** | ~14k params, architecture defined |
+| HLS Export | **Ready** | hls4ml config for Vivado HLS |
+| RTL Testbench | **Ready** | Verilog TB + hex test vectors |
+| **Dataset** | **NEEDED** | Download RadioML 2018.01A HDF5 |
 
 ---
 
@@ -54,7 +68,7 @@ Dense(8, Softmax)
 **Training Config:**
 - Epochs: 30 (with EarlyStopping patience=5)
 - Optimizer: Adam, lr=0.001
-- Loss: categorical_crossentropy
+- Loss: SparseCategoricalCrossentropy
 - Callbacks: ModelCheckpoint, EarlyStopping
 
 **Output:** `results/model_1d_base.h5`
@@ -85,10 +99,31 @@ config['Model']['Strategy'] = 'Latency'
 **File:** `src/rtl_testbench.py`
 
 **Testbench Tasks:**
-1. Generate test vectors from validation set (10-20 samples)
+1. Generate test vectors from validation set (16 samples)
 2. Export as hex files for Verilog testbench
-3. Create Verilog testbench wrapper
+3. Create Verilog testbench wrapper with pass/fail checking
 4. Output: `fpga_rtl_export/tb_amc_accelerator.v`
+
+---
+
+## Quick Start
+
+```bash
+# 1. Install dependencies
+cd nano-amc
+pip install -r requirements.txt
+
+# 2. Download dataset (manual step)
+# Get GOLD_XYZ_OSC.0001_1024.hdf5 from https://www.deepsig.ai/datasets
+# Place in: nano-amc/data/GOLD_XYZ_OSC.0001_1024.hdf5
+
+# 3. Run pipeline
+cd src
+python data_loader_1d.py      # Validate data pipeline
+python train_1d_cnn.py        # Train model (~5-10 min)
+python export_hls.py          # Generate RTL (requires Vivado HLS)
+python rtl_testbench.py       # Generate test vectors
+```
 
 ---
 
@@ -98,126 +133,200 @@ config['Model']['Strategy'] = 'Latency'
 nano-amc/
 ├── README.md
 ├── requirements.txt
+├── data/
+│   └── GOLD_XYZ_OSC.0001_1024.hdf5   # RadioML dataset (download required)
 ├── src/
-│   ├── data_loader_1d.py        # Raw I/Q data pipeline
-│   ├── train_1d_cnn.py          # Model definition + training
-│   ├── export_hls.py            # hls4ml conversion
-│   └── rtl_testbench.py         # Testbench generation
+│   ├── config.py              # Central configuration
+│   ├── data_loader_1d.py      # Raw I/Q data pipeline
+│   ├── train_1d_cnn.py        # Model definition + training
+│   ├── export_hls.py          # hls4ml conversion
+│   └── rtl_testbench.py       # Testbench generation
 ├── results/
-│   └── model_1d_base.h5         # Trained model
+│   └── model_1d_base.h5       # Trained model (generated)
 └── fpga_rtl_export/
-    ├── *.v                      # Generated Verilog files
-    ├── tb_amc_accelerator.v     # Testbench
-    └── test_vectors/            # Hex test data
+    ├── hls_project/           # hls4ml output (generated)
+    ├── tb_amc_accelerator.v   # Verilog testbench (generated)
+    └── test_vectors/
+        ├── test_inputs.hex    # I/Q test data (generated)
+        └── expected_labels.hex # Ground truth labels (generated)
+```
+
+---
+
+## Architecture
+
+### Model: nano_amc_cnn
+
+```
+Input: (1024, 2)                    # 1024 I/Q samples
+    ↓
+Conv1D(16, kernel=7, ReLU) + BatchNorm
+MaxPooling1D(pool=4)                # → (256, 16)
+    ↓
+Conv1D(32, kernel=5, ReLU) + BatchNorm
+MaxPooling1D(pool=4)                # → (64, 32)
+    ↓
+Conv1D(64, kernel=3, ReLU) + BatchNorm  # → (64, 64)
+    ↓
+GlobalAveragePooling1D              # → (64,)
+Dense(32, ReLU)                     # → (32,)
+Dense(8, Softmax)                   # → (8,) class probabilities
+```
+
+**Parameters:** ~14,000 (well under 50k budget)
+
+### Fixed-Point Configuration
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Precision | `ap_fixed<16,6>` | 16 bits total, 6 integer bits, 10 fractional bits |
+| Range | [-32, +32) | With resolution ~0.001 |
+| ReuseFactor | 4 | DSP slice optimization |
+| Strategy | Latency | Minimize inference cycles |
+
+---
+
+## Configuration
+
+All parameters are centralized in `src/config.py`:
+
+```python
+# Dataset
+DATASET_PATH = Path("data/GOLD_XYZ_OSC.0001_1024.hdf5")
+TARGET_MODS = ["BPSK", "4ASK", "QPSK", "OQPSK", "8PSK", "16QAM", "32QAM", "64QAM"]
+TARGET_SNRS = [0, 2, 4, 6, 8, 10]
+
+# Training
+BATCH_SIZE = 128
+EPOCHS = 30
+LEARNING_RATE = 0.001
+EARLY_STOPPING_PATIENCE = 5
+
+# HLS
+HLS_PRECISION = "ap_fixed<16,6>"
+HLS_REUSE_FACTOR = 4
+HLS_STRATEGY = "Latency"
+```
 
 ---
 
 ## Development Log
 
-- Created the `src/` scaffolding with `data_loader_1d.py`, `train_1d_cnn.py`, `export_hls.py`, and `rtl_testbench.py` so the RadioML pipeline can be exercised end-to-end: loading/normalizing I/Q data, training the <50k-parameter 1D CNN, exporting the Keras model to fixed-point hls4ml, and producing validation hex vectors for RTL testbenches.
-- Added the `results/` directory, the `fpga_rtl_export/test_vectors/` subfolder, and `requirements.txt` (tensorflow>=2.10, numpy, h5py, hls4ml[profiling]) so artifacts, exports, and dependencies have explicit homes.
-- Each script guards its inputs with clear errors and logs the key steps so you can follow what runs and adapt filters/precision before pointing at the real RadioML dataset.
+### v0.3 (Current) - Code Audit Fixes
+
+**Critical Fixes:**
+- **Central config.py:** All constants now in one place (dataset path, mods, SNRs, HLS params)
+- **RadioML 2018.01A format:** Properly handles one-hot `Y` labels and `Z` SNR arrays
+- **All 8 modulations:** Training now uses full 8-class set (was only 2)
+- **Quantization math:** Fixed ap_fixed<16,6> scaling (2^10 fractional bits, not 2^15)
+- **Hex format:** Changed `IIII_QQQQ` → `IIIIQQQQ` for Verilog $readmemh compatibility
+- **Expected labels:** Added `expected_labels.hex` for RTL verification
+- **Verilog testbench:** Full `tb_amc_accelerator.v` with pass/fail checking
+
+**Minor Fixes:**
+- Python 3.8 compatibility (List[str] instead of list[str])
+- Removed unused imports
+- Random seed for reproducibility (seed=42)
+
+### v0.2 - Initial Scaffolding
+
+- Created `src/` scaffolding with data_loader_1d.py, train_1d_cnn.py, export_hls.py, rtl_testbench.py
+- Added results/, fpga_rtl_export/test_vectors/, requirements.txt
+- Input validation, error handling, logging in all scripts
+- Parameter count verification with 50k budget warning
+- Model summary printed during training
+- Test set evaluation after training
+
+### v0.1 - Project Setup
+
+- Initial README with implementation plan
+- Directory structure defined
 
 ---
 
-## Code Review & Technical Details
+## Technical Details
 
-### Phase 1: Data Pipeline (`src/data_loader_1d.py`)
+### Data Pipeline (`data_loader_1d.py`)
 
-**Functionality:**
-- `load_iq_dataset(file_path)` — Loads RadioML HDF5 directly; reads all arrays into memory
-- `filter_samples(data, mods, snrs)` — Filters by modulation class and SNR; normalizes I/Q to [-1, 1]; maps mod labels to integers (0–7) for sparse categorical loss
-- `build_tf_datasets(samples, labels, batch_size=128)` — Shuffles and splits 70/15/15 into tf.data.Dataset objects with prefetch/batching
+| Function | Description |
+|----------|-------------|
+| `load_radioml_dataset()` | Load HDF5, decode one-hot Y to integers |
+| `filter_and_prepare()` | Filter by mods/SNRs, normalize to [-1,1] |
+| `build_tf_datasets()` | 70/15/15 split with batching/prefetch |
+| `load_and_prepare_data()` | Convenience wrapper for full pipeline |
 
-**Design Decisions:**
-- Reads full HDF5 into memory (efficient for ~2–4 GB datasets; becomes problematic at 10+ GB)
-- Supports both `"mods"` and `"modulations"` keys for RadioML variants
-- Label encoding auto-discovers unique classes and sorts alphabetically, so order is deterministic across runs
-- Normalization clips to [-1, 1] to match fixed-point ap_fixed<16,6> range
+### Training (`train_1d_cnn.py`)
 
-**Known Limitations:**
-- No validation that expected dataset keys exist until module runs
-- Assumes all I/Q samples are 1024 samples; hardcoded in README but not enforced in code
-- Full I/Q load blocks the program; consider lazy-loading or memory-mapped arrays for large datasets
+- Optimizer: Adam (lr=0.001)
+- Loss: SparseCategoricalCrossentropy
+- Callbacks: ModelCheckpoint (best val_accuracy), EarlyStopping (patience=5)
+- Test set evaluated after training
 
-### Phase 2: Training (`src/train_1d_cnn.py`)
+### HLS Export (`export_hls.py`)
 
-**Model Architecture:**
-- Conv1D(16, 7, relu) → BatchNorm → MaxPool(4) → [256 features]
-- Conv1D(32, 5, relu) → BatchNorm → MaxPool(4) → [64 features]
-- Conv1D(64, 3, relu) → BatchNorm → [64 features]
-- GlobalAveragePooling1D → Dense(32, relu) → Dense(8, softmax)
-- **Parameter count:** ~14,000 (well under 50k budget); breakdown: ~15k from dense layers, ~6k from conv kernels
+- Backend: Vivado HLS
+- Part: xc7z020clg400-1 (PYNQ-Z1/Z2)
+- Output: `fpga_rtl_export/hls_project/`
 
-**Training Config:**
-- Optimizer: Adam(lr=0.001)
-- Loss: SparseCategoricalCrossentropy (expects integer labels 0–7, not one-hot)
-- Callbacks: ModelCheckpoint (save best val_acc), EarlyStopping (patience=5)
-- Default 30 epochs; stops early if validation accuracy plateaus
+### RTL Testbench (`rtl_testbench.py`)
 
-**Design Decisions:**
-- Small conv kernels (7, 5, 3) capture I/Q correlations at multiple time scales
-- Batch normalization stabilizes training on fixed-precision data
-- Global pooling prevents spatial overfitting and reduces parameters
-- Early stopping prevents overfitting and saves compute time
+- 16 test vectors from validation set
+- Quantized to ap_fixed<16,6>
+- Hex format: 32-bit `IIIIQQQQ` per I/Q pair
+- Verilog TB with timeout and pass/fail counting
 
-**Known Limitations:**
-- No model summary printed (can't verify parameter count at runtime)
-- No learning rate scheduling; fixed lr=0.001 throughout
-- No dropout (relies only on batch norm for regularization)
-- Test set is never evaluated; only validation accuracy is tracked
-- Config values (batch size, kernel sizes, layer widths) are hardcoded; no config file
+---
 
-### Phase 3: HLS Export (`src/export_hls.py`)
+## Next Steps (Round 1 Submission)
 
-**Functionality:**
-- Loads saved Keras model
-- Configures hls4ml: granularity=`name`, precision=`ap_fixed<16,6>`, reuse_factor=4, strategy=`Latency`
-- Runs synthesis (RTL generation, C simulation skipped for speed)
+### Immediate (Before March 29)
 
-**Design Decisions:**
-- ap_fixed<16,6> = 16-bit total, 6 bits fractional. Supports ±511.984 range with ~0.016 precision
-- ReuseFactor=4 reuses hardware blocks 4x per clock (trades latency for area)
-- Latency strategy minimizes clock cycles; Pipeline strategy would minimize clock period instead
+1. **Download Dataset**
+   ```bash
+   # Download from https://www.deepsig.ai/datasets
+   # Place at: nano-amc/data/GOLD_XYZ_OSC.0001_1024.hdf5
+   ```
 
-**Known Limitations:**
-- No input validation: crashes silently if model doesn't exist
-- No logging of synthesis success/failure
-- Output directory not auto-created; assumes `fpga_rtl_export/` exists
-- No customization of hls4ml backend (Vivado HLS assumed; QuartusHLS not tested)
-- Verilog output location and naming hardcoded; not configurable
+2. **Train Model**
+   ```bash
+   cd src && python train_1d_cnn.py
+   # Expected: val_accuracy > 60%, model saved to results/model_1d_base.h5
+   ```
 
-### Phase 4: RTL Testbench (`src/rtl_testbench.py`)
+3. **Generate RTL**
+   ```bash
+   python export_hls.py
+   # Requires: Vivado HLS installed and licensed
+   # Output: fpga_rtl_export/hls_project/
+   ```
 
-**Functionality:**
-- Quantizes validation samples to ap_fixed<16,6> (16-bit signed int)
-- Writes first 16 samples as hex lines: `IIII_QQQQ` (4 hex digits I, 4 hex digits Q)
-- Output: `fpga_rtl_export/test_vectors/validation.hex`
+4. **Generate Test Vectors**
+   ```bash
+   python rtl_testbench.py
+   # Output: test_inputs.hex, expected_labels.hex, tb_amc_accelerator.v
+   ```
 
-**Design Decisions:**
-- Takes first 3 validation batches (≤384 samples) to have diverse test data
-- Limits to 16 samples to keep hex file small; manageable in Vivado sim
-- Hex format is space-efficient and easy to parse in Verilog $readmemh
+5. **Verify in Vivado**
+   - Import hls_project into Vivado
+   - Run behavioral simulation with tb_amc_accelerator.v
+   - Capture waveforms for submission
 
-**Known Limitations:**
-- Assumes validation set exists and has ≥1 sample; crashes if not
-- No output path checking; assumes `fpga_rtl_export/test_vectors/` exists
-- No expected outputs or labels written; testbench must infer correctness from waveforms
-- Only 16 samples; insufficient for statistical testing
+### For Submission Package
 
-### Integration & Workflow
+- [ ] Verilog RTL source code (from hls_project/syn/verilog/)
+- [ ] Testbench with simulation results
+- [ ] Technical report (separate document)
+- [ ] 5-10 min video demo
 
-**Execution order (must be sequential):**
-1. `python3 src/data_loader_1d.py` — Validate RadioML format and splits
-2. `python3 src/train_1d_cnn.py` — Train and save to `results/model_1d_base.h5` (~2–10 min)
-3. `python3 src/export_hls.py` — Generate Verilog (~5–15 min for synthesis)
-4. `python3 src/rtl_testbench.py` — Generate test vectors
-5. Open Vivado → Create HLS project → Import from `fpga_rtl_export/` → Simulate
+---
 
-**Why the scaffolding exists:**
-- Modular: each script is independent and can be re-run (e.g., retrain with different hyperparams)
-- Portable: relies only on public RadioML dataset and standard ML/RTL tools
-- Minimal: ~250 lines total, easy to debug or extend
+## Constraints
+
+- **No changes to deep-amc repo** - all new code in nano-amc only
+- **Bypass existing IP** - no image conversion, no SqueezeNet, no adaptive sampling
+- **Parameter budget** - <50k parameters (~14k achieved)
+- **Fixed-point** - ap_fixed<16,6> (16-bit, 6 integer bits, 10 fractional bits)
+- **Input shape** - 1024 I/Q samples per signal
 
 ---
 
@@ -230,53 +339,12 @@ h5py
 hls4ml[profiling]
 ```
 
----
-
-## Verification
-
-1. **Data Pipeline:** Run `data_loader_1d.py`, verify output shape `[batch, 1024, 2]`
-2. **Training:** Run `train_1d_cnn.py`, verify val_accuracy > 60%, model saved
-3. **HLS Export:** Run `export_hls.py`, verify Verilog files in `fpga_rtl_export/`
-4. **RTL Testbench:** Run Vivado behavioral simulation on `tb_amc_accelerator.v`
+**External:** Vivado HLS (for RTL synthesis)
 
 ---
 
-## Constraints
+## References
 
-- **No changes to deep-amc repo** - all new code in nano-amc only
-- **Bypass existing IP** - no image conversion, no SqueezeNet, no adaptive sampling
-- **Parameter budget** - model must have <50k parameters for FPGA synthesis (~14k achieved)
-- **Fixed-point precision** - ap_fixed<16,6> for hardware efficiency (16-bit signed, 6-bit fractional)
-- **Input shape** - 1024 I/Q samples per signal (enforced by Conv1D kernel; size mismatch will error at runtime)
-- **Data format** - HDF5 with keys {`X` or equiv., `mods`/`modulations`, `snrs`} required
-
----
-
-## Known Issues & Future Work
-
-### Fixes Applied (v0.2)
-- ✅ **Parameter count verification:** `model.count_params()` logged; warns if >50k
-- ✅ **Input validation:** All scripts now validate required keys, file existence, and dataset shape
-- ✅ **Path creation:** Output directories auto-created (mkdir -p behavior)
-- ✅ **Test set evaluation:** Test accuracy now computed and logged
-- ✅ **Error handling:** Try/except blocks in all main() functions with proper logging
-- ✅ **Model summary:** `model.summary()` printed to stdout during training
-- ✅ **Synthesis logging:** hls4ml build steps logged with status
-- ✅ **Sample count validation:** Warns if sample count <1024, ensures ≥1 validation sample
-
-### Remaining Improvements
-- **Config file:** Move hardcoded values (batch size, epochs, precision) to YAML/JSON for reproducibility
-
-### Optional Enhancements
-- **Learning rate scheduling:** Implement cosine annealing or step decay
-- **Dropout regularization:** Add dropout(0.2) after Dense(32) for better generalization
-- **Batch size sweep:** Script to test batch sizes 32, 64, 128, 256 for memory/speed tradeoffs
-- **Modulation-specific metrics:** Log per-class precision/recall during training
-- **Expected test vectors:** Extend rtl_testbench.py to save not just inputs but ground-truth labels and model predictions
-- **Vivado integration:** Auto-generate Tcl script to open HLS project and run C simulation
-
-### Testing
-- No unit tests exist; recommend pytest fixtures for data_loader and model training edge cases
-- No integration test; recommend end-to-end pipeline smoke test on synthetic data
-
----
+- RadioML 2018.01A Dataset: https://www.deepsig.ai/datasets
+- hls4ml Documentation: https://fastmachinelearning.org/hls4ml/
+- PYNQ Documentation: https://pynq.readthedocs.io/
