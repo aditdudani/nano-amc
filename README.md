@@ -26,7 +26,7 @@ Lightweight 1D CNN for real-time spectrum monitoring and signal classification, 
 | 1D CNN Model | **Ready** | ~14k params, architecture defined |
 | HLS Export | **Ready** | hls4ml config for Vivado HLS |
 | RTL Testbench | **Ready** | Verilog TB + hex test vectors |
-| **Dataset** | **NEEDED** | Download RadioML 2018.01A HDF5 |
+| Dataset | **Ready** | Uses shared dataset from amc_project |
 
 ---
 
@@ -110,13 +110,13 @@ config['Model']['Strategy'] = 'Latency'
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
+# 1. Clone to server (assumes amc_project already exists)
+cd ~/projects
+git clone https://github.com/aditdudani/nano-amc.git
+
+# 2. Install dependencies
 cd nano-amc
 pip install -r requirements.txt
-
-# 2. Download dataset (manual step)
-# Get GOLD_XYZ_OSC.0001_1024.hdf5 from https://www.deepsig.ai/datasets
-# Place in: nano-amc/data/GOLD_XYZ_OSC.0001_1024.hdf5
 
 # 3. Run pipeline
 cd src
@@ -126,30 +126,34 @@ python export_hls.py          # Generate RTL (requires Vivado HLS)
 python rtl_testbench.py       # Generate test vectors
 ```
 
+**Note:** Dataset path is configured to use `../amc_project/data/GOLD_XYZ_OSC.0001_1024.hdf5` (shared with amc_project).
+
 ---
 
 ## Directory Structure
 
 ```
-nano-amc/
-├── README.md
-├── requirements.txt
-├── data/
-│   └── GOLD_XYZ_OSC.0001_1024.hdf5   # RadioML dataset (download required)
-├── src/
-│   ├── config.py              # Central configuration
-│   ├── data_loader_1d.py      # Raw I/Q data pipeline
-│   ├── train_1d_cnn.py        # Model definition + training
-│   ├── export_hls.py          # hls4ml conversion
-│   └── rtl_testbench.py       # Testbench generation
-├── results/
-│   └── model_1d_base.h5       # Trained model (generated)
-└── fpga_rtl_export/
-    ├── hls_project/           # hls4ml output (generated)
-    ├── tb_amc_accelerator.v   # Verilog testbench (generated)
-    └── test_vectors/
-        ├── test_inputs.hex    # I/Q test data (generated)
-        └── expected_labels.hex # Ground truth labels (generated)
+~/projects/
+├── amc_project/
+│   └── data/
+│       └── GOLD_XYZ_OSC.0001_1024.hdf5   # Shared RadioML dataset
+└── nano-amc/
+    ├── README.md
+    ├── requirements.txt
+    ├── src/
+    │   ├── config.py              # Central configuration
+    │   ├── data_loader_1d.py      # Raw I/Q data pipeline
+    │   ├── train_1d_cnn.py        # Model definition + training
+    │   ├── export_hls.py          # hls4ml conversion
+    │   └── rtl_testbench.py       # Testbench generation
+    ├── results/
+    │   └── model_1d_base.h5       # Trained model (generated)
+    └── fpga_rtl_export/
+        ├── hls_project/           # hls4ml output (generated)
+        ├── tb_amc_accelerator.v   # Verilog testbench (generated)
+        └── test_vectors/
+            ├── test_inputs.hex    # I/Q test data (generated)
+            └── expected_labels.hex # Ground truth labels (generated)
 ```
 
 ---
@@ -171,7 +175,7 @@ Conv1D(64, kernel=3, ReLU) + BatchNorm  # → (64, 64)
     ↓
 GlobalAveragePooling1D              # → (64,)
 Dense(32, ReLU)                     # → (32,)
-Dense(8, Softmax)                   # → (8,) class probabilities
+Dense(6, Softmax)                   # → (6,) class probabilities
 ```
 
 **Parameters:** ~14,000 (well under 50k budget)
@@ -192,8 +196,8 @@ Dense(8, Softmax)                   # → (8,) class probabilities
 All parameters are centralized in `src/config.py`:
 
 ```python
-# Dataset
-DATASET_PATH = Path("data/GOLD_XYZ_OSC.0001_1024.hdf5")
+# Dataset (shared with amc_project)
+DATASET_PATH = Path("../amc_project/data/GOLD_XYZ_OSC.0001_1024.hdf5")
 TARGET_MODS = ["BPSK", "QPSK", "8PSK", "16QAM", "64QAM", "OQPSK"]
 TARGET_SNRS = [6, 8, 10, 12, 14]
 
@@ -213,12 +217,18 @@ HLS_STRATEGY = "Latency"
 
 ## Development Log
 
-### v0.3 (Current) - Code Audit Fixes
+### v0.4 (Current) - Server Deployment
+
+- **Dataset path:** Changed to `../amc_project/data/` to share dataset with amc_project
+- **TF log suppression:** Added `TF_CPP_MIN_LOG_LEVEL=2` to all scripts to suppress INFO/WARNING logs
+- **Server setup:** Updated Quick Start with clone instructions for `~/projects/` deployment
+
+### v0.3 - Code Audit Fixes
 
 **Critical Fixes:**
 - **Central config.py:** All constants now in one place (dataset path, mods, SNRs, HLS params)
 - **RadioML 2018.01A format:** Properly handles one-hot `Y` labels and `Z` SNR arrays
-- **All 8 modulations:** Training now uses full 8-class set (was only 2)
+- **6 modulations:** Optimized class selection (dropped 4ASK, 32QAM for better accuracy)
 - **Quantization math:** Fixed ap_fixed<16,6> scaling (2^10 fractional bits, not 2^15)
 - **Hex format:** Changed `IIII_QQQQ` → `IIIIQQQQ` for Verilog $readmemh compatibility
 - **Expected labels:** Added `expected_labels.hex` for RTL verification
@@ -282,32 +292,26 @@ HLS_STRATEGY = "Latency"
 
 ### Immediate (Before March 29)
 
-1. **Download Dataset**
-   ```bash
-   # Download from https://www.deepsig.ai/datasets
-   # Place at: nano-amc/data/GOLD_XYZ_OSC.0001_1024.hdf5
-   ```
-
-2. **Train Model**
+1. **Train Model**
    ```bash
    cd src && python train_1d_cnn.py
-   # Expected: val_accuracy > 60%, model saved to results/model_1d_base.h5
+   # Expected: val_accuracy > 85%, model saved to results/model_1d_base.h5
    ```
 
-3. **Generate RTL**
+2. **Generate RTL**
    ```bash
    python export_hls.py
    # Requires: Vivado HLS installed and licensed
    # Output: fpga_rtl_export/hls_project/
    ```
 
-4. **Generate Test Vectors**
+3. **Generate Test Vectors**
    ```bash
    python rtl_testbench.py
    # Output: test_inputs.hex, expected_labels.hex, tb_amc_accelerator.v
    ```
 
-5. **Verify in Vivado**
+4. **Verify in Vivado**
    - Import hls_project into Vivado
    - Run behavioral simulation with tb_amc_accelerator.v
    - Capture waveforms for submission

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
-
 from typing import Tuple
+
+# Suppress TensorFlow C++ logs before importing tf
+if "TF_CPP_MIN_LOG_LEVEL" not in os.environ:
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # suppress INFO and WARNING
 
 import tensorflow as tf
 

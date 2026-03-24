@@ -6,8 +6,13 @@ Handles RadioML 2018.01A HDF5 format with one-hot encoded labels.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import List, Tuple
+
+# Suppress TensorFlow C++ logs before importing tf
+if "TF_CPP_MIN_LOG_LEVEL" not in os.environ:
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # suppress INFO and WARNING
 
 import h5py
 import numpy as np

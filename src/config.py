@@ -2,9 +2,10 @@
 
 from pathlib import Path
 
-# Dataset path - update this to point to your RadioML 2018.01A HDF5 file
-# Download from: https://www.deepsig.ai/datasets
-DATASET_PATH = Path("data/GOLD_XYZ_OSC.0001_1024.hdf5")
+# Dataset path - points to shared amc_project dataset on server
+# Local: data/GOLD_XYZ_OSC.0001_1024.hdf5
+# Server: ../amc_project/data/GOLD_XYZ_OSC.0001_1024.hdf5
+DATASET_PATH = Path("../amc_project/data/GOLD_XYZ_OSC.0001_1024.hdf5")
 
 # 6 modulation classes (well-separated for high accuracy)
 # Dropped: 4ASK (confuses with BPSK), 32QAM (confuses with 16/64QAM)
