@@ -6,11 +6,12 @@ from pathlib import Path
 # Download from: https://www.deepsig.ai/datasets
 DATASET_PATH = Path("data/GOLD_XYZ_OSC.0001_1024.hdf5")
 
-# 8 modulation classes for classification (from Peng et al. 2018)
-TARGET_MODS = ["BPSK", "4ASK", "QPSK", "OQPSK", "8PSK", "16QAM", "32QAM", "64QAM"]
+# 6 modulation classes (well-separated for high accuracy)
+# Dropped: 4ASK (confuses with BPSK), 32QAM (confuses with 16/64QAM)
+TARGET_MODS = ["BPSK", "QPSK", "8PSK", "16QAM", "64QAM", "OQPSK"]
 
-# SNR range in dB (0-10 dB with 2 dB steps)
-TARGET_SNRS = [0, 2, 4, 6, 8, 10]
+# SNR range in dB (6-14 dB for respectable accuracy, avoiding noisy 0-4 dB)
+TARGET_SNRS = [6, 8, 10, 12, 14]
 
 # Full 24-class label order from RadioML 2018.01A (for decoding one-hot Y)
 RADIOML_CLASSES = [

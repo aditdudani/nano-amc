@@ -10,8 +10,9 @@ Lightweight 1D CNN for real-time spectrum monitoring and signal classification, 
 
 **Dataset:** RadioML 2018.01A (public, download from https://www.deepsig.ai/datasets)
 - Shape: `[N, 1024, 2]` (1024 I/Q samples, 2 channels)
-- 8 modulation classes: BPSK, 4ASK, QPSK, OQPSK, 8PSK, 16QAM, 32QAM, 64QAM
-- SNR filter: 0, 2, 4, 6, 8, 10 dB
+- 6 modulation classes: BPSK, QPSK, 8PSK, 16QAM, 64QAM, OQPSK
+- SNR range: 6, 8, 10, 12, 14 dB
+- Expected accuracy: **85-90%** (based on amc_project results)
 
 **Target Hardware:** PYNQ-Z1/Z2 (Zynq xc7z020clg400-1)
 
@@ -62,7 +63,7 @@ MaxPooling1D(pool=4)
 Conv1D(64, kernel=3, ReLU) + BatchNorm
 GlobalAveragePooling1D
 Dense(32, ReLU)
-Dense(8, Softmax)
+Dense(6, Softmax)
 ```
 
 **Training Config:**
@@ -193,8 +194,8 @@ All parameters are centralized in `src/config.py`:
 ```python
 # Dataset
 DATASET_PATH = Path("data/GOLD_XYZ_OSC.0001_1024.hdf5")
-TARGET_MODS = ["BPSK", "4ASK", "QPSK", "OQPSK", "8PSK", "16QAM", "32QAM", "64QAM"]
-TARGET_SNRS = [0, 2, 4, 6, 8, 10]
+TARGET_MODS = ["BPSK", "QPSK", "8PSK", "16QAM", "64QAM", "OQPSK"]
+TARGET_SNRS = [6, 8, 10, 12, 14]
 
 # Training
 BATCH_SIZE = 128
