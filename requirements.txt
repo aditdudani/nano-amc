@@ -1,4 +1,28 @@
-tensorflow>=2.10
-numpy
-h5py
-hls4ml[profiling]
+# nano-amc requirements
+# FPGA Hackathon 2026 - Automatic Modulation Classification
+
+# =============================================================================
+# Core ML Framework
+# =============================================================================
+tensorflow>=2.10,<3.0      # Model training and inference
+numpy>=1.21,<2.0           # Array operations
+h5py>=3.0                  # HDF5 dataset loading (RadioML 2018.01A)
+
+# =============================================================================
+# HLS Export (Verilog RTL generation)
+# =============================================================================
+hls4ml[profiling]>=0.8.0   # Keras to HLS/Verilog conversion
+                           # [profiling] includes plotting utilities
+
+# =============================================================================
+# Optional but recommended
+# =============================================================================
+matplotlib>=3.5            # Plotting (confusion matrix, training curves)
+scikit-learn>=1.0          # Metrics (classification report, confusion matrix)
+
+# =============================================================================
+# Notes
+# =============================================================================
+# - For HLS export: Requires Vitis HLS 2020.1+ installed separately
+# - Windows recommended for HLS export (Xilinx tools)
+# - Training can run on Linux/WSL/server without Xilinx tools
