@@ -42,6 +42,8 @@ EARLY_STOPPING_PATIENCE = 5
 HLS_PRECISION = "ap_fixed<16,6>"  # 16 bits total, 6 integer bits, 10 fractional bits
 HLS_REUSE_FACTOR = 4
 HLS_STRATEGY = "Latency"
+HLS_PART = "xc7z020clg400-1"  # PYNQ-Z1/Z2 (use xc7z020clg484-1 for ZedBoard)
+HLS_BACKEND = "Vitis"  # Use "Vitis" for Xilinx 2020.1+, "Vivado" for older versions
 
 # Fixed-point parameters (derived from ap_fixed<16,6>)
 FIXED_POINT_TOTAL_BITS = 16

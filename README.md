@@ -12,7 +12,7 @@ Lightweight 1D CNN for real-time spectrum monitoring and signal classification, 
 - Shape: `[N, 1024, 2]` (1024 I/Q samples, 2 channels)
 - 6 modulation classes: BPSK, QPSK, 8PSK, 16QAM, 64QAM, OQPSK
 - SNR range: 6, 8, 10, 12, 14 dB
-- Expected accuracy: **85-90%** (based on amc_project results)
+- **Achieved accuracy: 96.97%** (test set)
 
 **Target Hardware:** PYNQ-Z1/Z2 (Zynq xc7z020clg400-1)
 
@@ -22,10 +22,11 @@ Lightweight 1D CNN for real-time spectrum monitoring and signal classification, 
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Data Pipeline | **Ready** | Loads RadioML 2018.01A, filters, normalizes |
-| 1D CNN Model | **Ready** | ~14k params, architecture defined |
-| HLS Export | **Ready** | hls4ml config for Vivado HLS |
-| RTL Testbench | **Ready** | Verilog TB + hex test vectors |
+| Data Pipeline | **Done** | Loads RadioML 2018.01A, filters, normalizes |
+| 1D CNN Model | **Done** | 11,766 params, 96.97% test accuracy |
+| Training | **Done** | Trained on server, 26 epochs |
+| HLS Export | **Pending** | Requires Vitis HLS on Windows |
+| RTL Testbench | **Pending** | Run after HLS export |
 | Dataset | **Ready** | Uses shared dataset from amc_project |
 
 ---
@@ -109,6 +110,8 @@ config['Model']['Strategy'] = 'Latency'
 
 ## Quick Start
 
+### Server/WSL (Training)
+
 ```bash
 # 1. Clone to server (assumes amc_project already exists)
 cd ~/projects
@@ -118,11 +121,30 @@ git clone https://github.com/aditdudani/nano-amc.git
 cd nano-amc
 pip install -r requirements.txt
 
-# 3. Run pipeline
+# 3. Run training
 cd src
 python data_loader_1d.py      # Validate data pipeline
 python train_1d_cnn.py        # Train model (~5-10 min)
-python export_hls.py          # Generate RTL (requires Vivado HLS)
+```
+
+### Windows (HLS Export)
+
+```powershell
+# 1. Clone repo to Windows drive
+cd C:\Users\<username>
+git clone https://github.com/aditdudani/nano-amc.git
+
+# 2. Copy trained model from server/WSL
+# Copy results/model_1d_base.h5 to Windows clone
+
+# 3. Install dependencies
+cd nano-amc
+pip install -r requirements.txt
+
+# 4. Setup Xilinx tools and run HLS export
+C:\Xilinx\2025.1\Vitis\settings64.bat
+cd src
+python export_hls.py          # Generate RTL (5-15 min)
 python rtl_testbench.py       # Generate test vectors
 ```
 
@@ -211,13 +233,32 @@ EARLY_STOPPING_PATIENCE = 5
 HLS_PRECISION = "ap_fixed<16,6>"
 HLS_REUSE_FACTOR = 4
 HLS_STRATEGY = "Latency"
+HLS_PART = "xc7z020clg400-1"      # PYNQ (use xc7z020clg484-1 for ZedBoard)
+HLS_BACKEND = "Vitis"             # Use "Vitis" for Xilinx 2020.1+
 ```
 
 ---
 
 ## Development Log
 
-### v0.4 (Current) - Server Deployment
+### v0.5 (Current) - Training Complete
+
+**Training Results:**
+- **Test accuracy: 96.97%** (far exceeded 85-90% target)
+- **Val accuracy: 96.97%**
+- Parameters: 11,766 (well under 50k budget)
+- Epochs: 26 (early stopped, best at epoch 21)
+- Samples: 122,880 (filtered from 2.5M)
+- Classes: 16QAM, 64QAM, 8PSK, BPSK, OQPSK, QPSK
+
+**Fixes:**
+- **Keras 2.x/3.x compatibility:** Added `compile=False` to model loading in export_hls.py and rtl_testbench.py
+- **HLS config:** Added `HLS_PART` and `HLS_BACKEND` to config.py (configurable FPGA part and backend)
+- **Vitis backend:** Changed from "Vivado" to "Vitis" for Xilinx 2020.1+ compatibility
+
+**Note:** HLS export requires running from Windows (Xilinx tools have Windows paths).
+
+### v0.4 - Server Deployment
 
 - **Dataset path:** Changed to `../amc_project/data/` to share dataset with amc_project
 - **TF log suppression:** Added `TF_CPP_MIN_LOG_LEVEL=2` to all scripts to suppress INFO/WARNING logs
@@ -275,9 +316,10 @@ HLS_STRATEGY = "Latency"
 
 ### HLS Export (`export_hls.py`)
 
-- Backend: Vivado HLS
+- Backend: Vitis HLS (Xilinx 2020.1+)
 - Part: xc7z020clg400-1 (PYNQ-Z1/Z2)
 - Output: `fpga_rtl_export/hls_project/`
+- **Note:** Must run from Windows with Xilinx tools on PATH
 
 ### RTL Testbench (`rtl_testbench.py`)
 
@@ -292,16 +334,16 @@ HLS_STRATEGY = "Latency"
 
 ### Immediate (Before March 29)
 
-1. **Train Model**
-   ```bash
-   cd src && python train_1d_cnn.py
-   # Expected: val_accuracy > 85%, model saved to results/model_1d_base.h5
-   ```
+1. ~~**Train Model**~~ **DONE** ✓
+   - Test accuracy: 96.97%
+   - Model saved: `results/model_1d_base.h5`
 
-2. **Generate RTL**
-   ```bash
+2. **Generate RTL** (Windows - Vitis HLS required)
+   ```powershell
+   # In Windows PowerShell
+   cd C:\path\to\nano-amc\src
+   C:\Xilinx\2025.1\Vitis\settings64.bat
    python export_hls.py
-   # Requires: Vivado HLS installed and licensed
    # Output: fpga_rtl_export/hls_project/
    ```
 
@@ -344,7 +386,7 @@ h5py
 hls4ml[profiling]
 ```
 
-**External:** Vivado HLS (for RTL synthesis)
+**External:** Vitis HLS 2020.1+ (for RTL synthesis) - Windows recommended
 
 ---
 

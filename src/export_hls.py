@@ -19,6 +19,8 @@ from config import (
     HLS_PRECISION,
     HLS_REUSE_FACTOR,
     HLS_STRATEGY,
+    HLS_PART,
+    HLS_BACKEND,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +33,8 @@ def export_model(
     precision: str = HLS_PRECISION,
     reuse_factor: int = HLS_REUSE_FACTOR,
     strategy: str = HLS_STRATEGY,
+    part: str = HLS_PART,
+    backend: str = HLS_BACKEND,
 ) -> None:
     """Compile the Keras model into an hls4ml project with fixed-point precision.
 
@@ -40,6 +44,8 @@ def export_model(
         precision: Fixed-point precision (e.g., "ap_fixed<16,6>")
         reuse_factor: Hardware reuse factor for DSP optimization
         strategy: HLS strategy ("Latency" or "Resource")
+        part: FPGA part number (e.g., xc7z020clg400-1 for PYNQ)
+        backend: HLS backend ("Vitis" for 2020.1+, "Vivado" for older)
     """
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found at {model_path}")
@@ -48,13 +54,17 @@ def export_model(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Loading model from %s", model_path)
-    model = tf.keras.models.load_model(model_path)
+    # Load with compile=False to avoid Keras 2.x/3.x compatibility issues
+    # (optimizer/loss config not needed for HLS export, only architecture + weights)
+    model = tf.keras.models.load_model(model_path, compile=False)
     model.summary()
 
     logger.info("Generating HLS configuration...")
     logger.info("  Precision: %s", precision)
     logger.info("  ReuseFactor: %d", reuse_factor)
     logger.info("  Strategy: %s", strategy)
+    logger.info("  Part: %s", part)
+    logger.info("  Backend: %s", backend)
 
     config = hls4ml.utils.config_from_keras_model(model, granularity="name")
     config["Model"]["Precision"] = precision
@@ -66,8 +76,8 @@ def export_model(
         model,
         hls_config=config,
         output_dir=str(output_dir / "hls_project"),
-        backend="Vivado",
-        part="xc7z020clg400-1",  # PYNQ-Z1/Z2 part number
+        backend=backend,
+        part=part,
     )
 
     logger.info("Compiling HLS model...")

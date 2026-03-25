@@ -312,7 +312,7 @@ def get_model_predictions(
         logger.warning("Model not found at %s, using ground truth labels instead", model_path)
         return None
 
-    model = tf.keras.models.load_model(model_path)
+    model = tf.keras.models.load_model(model_path, compile=False)
     predictions = model.predict(samples[:num_vectors], verbose=0)
     return np.argmax(predictions, axis=1)
 
