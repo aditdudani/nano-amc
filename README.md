@@ -25,8 +25,10 @@ Lightweight 1D CNN for real-time spectrum monitoring and signal classification, 
 | Data Pipeline | **Done** | Loads RadioML 2018.01A, filters, normalizes |
 | 1D CNN Model | **Done** | 11,766 params, 96.97% test accuracy |
 | Training | **Done** | Trained on server, 26 epochs |
-| HLS Export | **Pending** | Requires Vitis HLS on Windows |
-| RTL Testbench | **Pending** | Run after HLS export |
+| HLS Export | **Done** | C++ firmware generated in `fpga_rtl_export/hls_project/` |
+| C Synthesis | **Pending** | Run in Vitis HLS GUI or via TCL |
+| RTL Export | **Pending** | Export IP after synthesis |
+| RTL Testbench | **Pending** | Generate test vectors after RTL export |
 | Dataset | **Ready** | Uses shared dataset from amc_project |
 
 ---
@@ -241,7 +243,23 @@ HLS_BACKEND = "Vitis"             # Use "Vitis" for Xilinx 2020.1+
 
 ## Development Log
 
-### v0.5 (Current) - Training Complete
+### v0.6 (Current) - HLS C++ Export Complete
+
+**HLS Export Results:**
+- Successfully converted Keras model to HLS C++ using hls4ml
+- Output directory: `fpga_rtl_export/hls_project/`
+- Generated files:
+  - `firmware/myproject.cpp` - Main HLS C++ implementation
+  - `firmware/myproject.h` - Header with interface definitions
+  - `firmware/weights/` - Quantized weights (ap_fixed<16,6>)
+  - `firmware/nnet_utils/` - HLS neural network utilities
+  - `build_prj.tcl` - TCL script for Vitis HLS synthesis
+- Configuration: `ap_fixed<16,6>`, ReuseFactor=4, Latency strategy
+- Target: xc7z020clg400-1 (PYNQ-Z1/Z2)
+
+**Note:** Windows skips automatic synthesis - run manually in Vitis HLS (see Next Steps below).
+
+### v0.5 - Training Complete
 
 **Training Results:**
 - **Test accuracy: 96.97%** (far exceeded 85-90% target)
@@ -338,29 +356,46 @@ HLS_BACKEND = "Vitis"             # Use "Vitis" for Xilinx 2020.1+
    - Test accuracy: 96.97%
    - Model saved: `results/model_1d_base.h5`
 
-2. **Generate RTL** (Windows - Vitis HLS required)
-   ```powershell
-   # In Windows PowerShell
-   cd C:\path\to\nano-amc\src
-   C:\Xilinx\2025.1\Vitis\settings64.bat
-   python export_hls.py
-   # Output: fpga_rtl_export/hls_project/
+2. ~~**Generate HLS C++ Project**~~ **DONE** ✓
+   - HLS firmware generated: `fpga_rtl_export/hls_project/`
+   - Configuration: ap_fixed<16,6>, ReuseFactor=4
+
+3. **Run C Synthesis in Vitis HLS** ← **YOU ARE HERE**
+   
+   **Option A: Vitis HLS GUI**
+   ```
+   1. Open Vitis HLS 2025.1
+   2. File → Open Project → fpga_rtl_export\hls_project\myproject_prj
+   3. Click 'Run C Synthesis' (green play button)
+   4. Wait for synthesis to complete (~5-15 min)
+   5. Review timing/resource utilization report
+   6. Click 'Export RTL' to generate Verilog IP
    ```
 
-3. **Generate Test Vectors**
-   ```bash
+   **Option B: Command Line (TCL)**
+   ```powershell
+   cd fpga_rtl_export\hls_project
+   vitis_hls -f build_prj.tcl
+   ```
+
+4. **Generate Test Vectors**
+   ```powershell
+   cd src
    python rtl_testbench.py
    # Output: test_inputs.hex, expected_labels.hex, tb_amc_accelerator.v
    ```
 
-4. **Verify in Vivado**
-   - Import hls_project into Vivado
-   - Run behavioral simulation with tb_amc_accelerator.v
+5. **Verify in Vivado**
+   - Import synthesized IP into Vivado project
+   - Run behavioral simulation with testbench
    - Capture waveforms for submission
 
 ### For Submission Package
 
-- [ ] Verilog RTL source code (from hls_project/syn/verilog/)
+- [x] Trained model with 96.97% accuracy
+- [x] HLS C++ project (hls4ml output)
+- [ ] Verilog RTL source code (from hls_project/myproject_prj/solution1/syn/verilog/ after synthesis)
+- [ ] Resource utilization report (from synthesis)
 - [ ] Testbench with simulation results
 - [ ] Technical report (separate document)
 - [ ] 5-10 min video demo

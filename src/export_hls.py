@@ -80,6 +80,31 @@ def export_model(
         part=part,
     )
 
+    logger.info("Writing HLS project files...")
+    hls_model.write()
+
+    project_dir = output_dir / "hls_project"
+    logger.info("HLS C++ project written to: %s", project_dir)
+
+    # Check if we're on Windows and skip compile/build (Unix Makefile incompatible)
+    if os.name == 'nt':
+        logger.warning("Windows detected - skipping compile() and build() steps")
+        logger.info("=" * 60)
+        logger.info("NEXT STEPS: Run synthesis manually in Vitis HLS")
+        logger.info("=" * 60)
+        logger.info("Option 1: Vitis HLS GUI")
+        logger.info("  1. Open Vitis HLS 2025.1")
+        logger.info("  2. File -> Open Project -> %s", project_dir / "myproject_prj")
+        logger.info("  3. Click 'Run C Synthesis' (green play button)")
+        logger.info("  4. After synthesis, click 'Export RTL'")
+        logger.info("")
+        logger.info("Option 2: Vitis HLS TCL (command line)")
+        logger.info("  cd %s", project_dir)
+        logger.info("  vitis_hls -f build_prj.tcl")
+        logger.info("=" * 60)
+        return
+
+    # On Linux/WSL, run compile and build normally
     logger.info("Compiling HLS model...")
     hls_model.compile()
 
@@ -91,7 +116,6 @@ def export_model(
         logger.info("Synthesis complete!")
 
         # Log output locations
-        project_dir = output_dir / "hls_project"
         verilog_dir = project_dir / "myproject_prj" / "solution1" / "syn" / "verilog"
 
         if verilog_dir.exists():
